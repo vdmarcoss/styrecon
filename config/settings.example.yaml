@@ -1,0 +1,13 @@
+# Optional future settings (not required in v0.1 runtime path)
+# This file is a placeholder to show how we could add defaults later.
+
+defaults:
+  project: "default"
+  db_path: ".runtime/styrecon.sqlite"
+  rate_limit_seconds: 0.2
+  timeout_seconds: 300
+  retries: 1
+
+headers:
+  default:
+    - "X-Hackerone: sty10x"

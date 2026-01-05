@@ -1,0 +1,55 @@
+# StyRecon profiles (v0.1)
+# Keep conservative defaults; active scanning is placeholder.
+tools:
+  subfinder:
+    bin: "subfinder"
+    base_flags: ["-silent", "-oJ"]
+    extra_flags: []
+    timeout_seconds: 300
+
+  assetfinder:
+    bin: "assetfinder"
+    base_flags: []
+    extra_flags: []
+    timeout_seconds: 300
+
+  waybackurls:
+    bin: "waybackurls"
+    base_flags: []
+    extra_flags: []
+    timeout_seconds: 300
+
+  httpx:
+    bin: "httpx-toolkit"
+    base_flags: ["-silent", "-json", "-sc", "-title", "-tech-detect", "-web-server"]
+    # Friendly-ish defaults; tune tomorrow if needed.
+    extra_flags: ["-threads", "10", "-rl", "50"]
+    timeout_seconds: 600
+
+profiles:
+  passive:
+    description: "OSINT discovery only (low/no direct probing)."
+    workflow:
+      - tool: "subfinder"
+        step_id: "discovery"
+      - tool: "assetfinder"
+        step_id: "discovery_alt"
+      - tool: "waybackurls"
+        step_id: "wayback"
+
+  verify:
+    description: "Discovery followed by HTTP probing (low noise)."
+    workflow:
+      - tool: "subfinder"
+        step_id: "discovery"
+      - tool: "assetfinder"
+        step_id: "discovery_alt"
+      - tool: "waybackurls"
+        step_id: "wayback"
+      - tool: "httpx"
+        step_id: "enrichment"
+        input_from: "discovery"
+
+  active:
+    description: "NOT IMPLEMENTED IN v0.1 (requires --active opt-in)."
+    workflow: []
