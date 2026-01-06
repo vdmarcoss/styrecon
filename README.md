@@ -60,7 +60,7 @@ StyRecon orchestrates external binaries. Ensure the following are available in y
 ## ⚙️ Installation
 
 ```bash
-git clone <REPO_URL>
+git clone https://github.com/vdmarcoss/styrecon.git
 cd styrecon
 
 python -m venv .venv
@@ -78,7 +78,7 @@ styrecon --help
 
 ## 📖 Usage Examples
 
-- 1) Passive scan (domain)
+1) Passive scan (domain)
 ```bash
 styrecon scan target.com \
   --project my_bug_bounty \
@@ -86,7 +86,7 @@ styrecon scan target.com \
   --scope-auto
 ```
 
-- 2) Verify a domain (discovery + http probe) + adding headers required in the bug hunter program with option `-H`
+2) Verify a domain (discovery + http probe) + adding headers required in the bug hunter program with option `-H`
 ```bash
 styrecon scan target.com \
   --profiles config/profiles.yaml \
@@ -103,7 +103,7 @@ styrecon scan target.com \
 
 ```
 
-- 3) Verify an exact URL (URL mode)
+3) Verify an exact URL (URL mode)
 ```bash
 # URL mode skips subdomain discovery and probes only the URL host (seeded)
 styrecon scan "https://api.target.com/v1" \
@@ -113,7 +113,7 @@ styrecon scan "https://api.target.com/v1" \
   -H "X-H1-traffic: myuser"
 ```
 
-- 4) Diff runs
+4) Diff runs
 ```bash
 # Compare the last two runs for a target
 styrecon diff target.com \
@@ -123,7 +123,7 @@ styrecon diff target.com \
 ```
 
 
-- 5) Dry-run (prints commands, executes nothing)
+5) Dry-run (prints commands, executes nothing)
 ```bash
 styrecon scan target.com \
   --project my_bug_bounty \
