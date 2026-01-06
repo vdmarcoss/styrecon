@@ -6,7 +6,14 @@ from pathlib import Path
 from typing import Dict, Iterable, List
 
 
-REDACT_KEYS = {"authorization", "cookie", "x-api-key", "api-key", "x-auth-token", "proxy-authorization"}
+REDACT_KEYS = {
+    "authorization",
+    "cookie",
+    "x-api-key",
+    "api-key",
+    "x-auth-token",
+    "proxy-authorization",
+}
 
 
 def build_run_logger(log_path: Path, verbose: bool = False) -> logging.Logger:
@@ -43,6 +50,8 @@ def redact_headers_for_display(headers: Iterable[str]) -> List[str]:
     out: List[str] = []
     for h in headers:
         if ":" not in h:
+            # Header inválido/inesperado: no lo persistimos tal cual.
+            out.append("<redacted>")
             continue
         k, v = h.split(":", 1)
         k_clean = k.strip()
@@ -56,20 +65,38 @@ def redact_headers_for_display(headers: Iterable[str]) -> List[str]:
 
 def redact_argv_for_logging(argv: List[str]) -> List[str]:
     """
-    Redacts sensitive header values passed via: -H "Key: Value"
+    Redacts sensitive header values passed via:
+      -H "Key: Value"
+      --header "Key: Value"
+      --header=Key: Value
+
+    NOTE: Only redacts when header key matches REDACT_KEYS.
     """
     out: List[str] = []
     i = 0
     while i < len(argv):
         tok = argv[i]
+
+        # Case 1: --header=Key: Value
+        if tok.startswith("--header="):
+            raw = tok.split("=", 1)[1]
+            red = redact_headers_for_display([raw])
+            out.append("--header=" + (red[0] if red else "<redacted>"))
+            i += 1
+            continue
+
         out.append(tok)
-        if tok == "-H" and i + 1 < len(argv):
+
+        # Case 2: -H "Key: Value" or --header "Key: Value"
+        if tok in ("-H", "--header") and i + 1 < len(argv):
             header = argv[i + 1]
             red = redact_headers_for_display([header])
             out.append(red[0] if red else "<redacted>")
             i += 2
             continue
+
         i += 1
+
     return out
 
 

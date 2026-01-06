@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
-import os
+import re
 import shlex
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -14,15 +13,32 @@ from rich.table import Table
 
 from styrecon.core.config import ProfilesConfig, load_profiles_config
 from styrecon.core.logger import build_run_logger, log_event, redact_headers_for_display
-from styrecon.core.scope import ScopePolicy, build_scope_policy
+from styrecon.core.scope import (
+    ScopePolicy,
+    build_scope_policy,
+    detect_target_kind,
+    extract_target_host,
+)
 from styrecon.core.state.db import DEFAULT_DB_PATH, Db, ensure_db_initialized
 from styrecon.core.state.diff import diff_runs
 from styrecon.modules.discovery import run_discovery
-from styrecon.modules.enrichment import run_httpx_verify
+from styrecon.modules.enrichment import run_httpx_verify, run_whatweb
 from styrecon.utils.ids import new_run_id
 
 app = typer.Typer(no_args_is_help=True)
 console = Console()
+
+_SAFE_SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
+
+
+def _slug(s: str) -> str:
+    s = (s or "").strip()
+    if not s:
+        return "unknown"
+    s = s.replace("://", "_")
+    s = _SAFE_SLUG_RE.sub("_", s)
+    s = s.strip("_")
+    return s or "unknown"
 
 
 def _safe_cli_command(argv: List[str]) -> str:
@@ -97,10 +113,9 @@ def _default_profiles_path() -> Path:
     )
 
 
-
 def _ensure_outdir(base: Path, project: str, target: str, run_id: str) -> Path:
-    safe_project = project.replace("/", "_")
-    safe_target = target.replace("/", "_")
+    safe_project = _slug(project)
+    safe_target = _slug(target)
     out_dir = base / safe_project / safe_target / run_id
     (out_dir / "raw").mkdir(parents=True, exist_ok=True)
     return out_dir
@@ -132,9 +147,22 @@ def _render_runs_table(rows: List[Dict[str, Any]]) -> None:
     console.print(t)
 
 
+def _print_banner(*, quiet: bool) -> None:
+    if quiet:
+        return
+    console.print("[bold]StyRecon — Pura Vida Ops[/bold]")
+    console.print("[dim]Use only on targets you are authorized to test.[/dim]")
+
+
 @app.command()
 def scan(
-    target: str = typer.Argument(..., help="Target root domain (e.g., example.com)"),
+    target: str = typer.Argument(
+        ...,
+        help=(
+            "Target can be a DOMAIN (example.com) or a URL (https://example.com/path). "
+            "If URL is provided, subdomain discovery is skipped and scope-auto will not expand to wildcards."
+        ),
+    ),
     project: str = typer.Option("default", "--project", "-p", help="Project name"),
     profile: str = typer.Option("passive", "--profile", help="Profile name from profiles.yaml"),
     profiles_path: Path = typer.Option(None, "--profiles", help="Path to profiles.yaml (default: config/profiles.yaml)"),
@@ -142,25 +170,54 @@ def scan(
     db_path: Path = typer.Option(DEFAULT_DB_PATH, "--db", help="SQLite DB path"),
     scope_allow: Optional[Path] = typer.Option(None, "--scope-allow", help="Allowlist file (one host/pattern per line)"),
     scope_block: Optional[Path] = typer.Option(None, "--scope-block", help="Blocklist file (one host/pattern per line)"),
-    scope_auto: bool = typer.Option(False, "--scope-auto", help="Auto-allow target and its subdomains"),
+    scope_auto: bool = typer.Option(False, "--scope-auto", help="Auto-allow target (and subdomains only for domain targets)"),
     no_scope: bool = typer.Option(False, "--no-scope", help="Disable scope (requires --i-accept-risk)"),
     i_accept_risk: bool = typer.Option(False, "--i-accept-risk", help="Required when using --no-scope"),
-    header: List[str] = typer.Option([], "--header", "-H", help="Custom header (repeatable), e.g. -H 'X-Hackerone: sty10x'"),
+    header: List[str] = typer.Option(
+        [],
+        "--header",
+        "-H",
+        help="Custom header (repeatable), e.g. -H 'X-H1-traffic: sty10x'",
+    ),
     headers_file: Optional[Path] = typer.Option(None, "--headers-file", help="File with headers (one per line)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Do not execute tools; only create run record + folders"),
     strict: bool = typer.Option(False, "--strict", help="Fail the run if a tool exits non-zero"),
     timeout: int = typer.Option(600, "--timeout", help="Max seconds per tool (cap)"),
-    retries: int = typer.Option(0, "--retries", help="Retries per tool (v0.1 placeholder)"),
+    retries: int = typer.Option(0, "--retries", help="Retries per tool"),
     rate_limit: float = typer.Option(0.0, "--rate-limit", help="Sleep between tool runs (seconds)"),
     verbose: bool = typer.Option(False, "--verbose", help="Verbose logging"),
+    show_cmd: bool = typer.Option(
+        True,
+        "--show-cmd/--no-show-cmd",
+        help="Show tool command lines in console (headers redacted).",
+    ),
+    show_output: bool = typer.Option(
+        True,
+        "--show-output/--no-show-output",
+        help="Print selected tool results to console (assetfinder/httpx/whatweb). wayback is summarized only.",
+    ),
+    quiet: bool = typer.Option(False, "--quiet", help="Minimal console output (still writes files/logs)."),
 ):
     """
     Run a scan using a profile workflow (v0.1).
+
+    Target modes:
+      - DOMAIN mode: target is a hostname (example.com). scope-auto allows target + *.target.
+      - URL mode: target includes scheme (https://example.com/path). subdomain discovery is skipped;
+        scope-auto allows only the exact host (no wildcard expansion).
     """
     profiles_path = profiles_path or _default_profiles_path()
     profiles_cfg: ProfilesConfig = load_profiles_config(profiles_path)
 
-    # scope policy
+    _print_banner(quiet=quiet)
+
+    target_kind = detect_target_kind(target)
+    target_host = extract_target_host(target)
+
+    if not target_host:
+        raise typer.BadParameter("Invalid target. Provide a domain (example.com) or a URL (https://example.com/path).")
+
+    # scope policy (scope_auto handles URL-vs-domain behavior inside core/scope.py)
     scope: ScopePolicy = build_scope_policy(
         targets=[target],
         scope_allow=scope_allow,
@@ -184,11 +241,12 @@ def scan(
     # Persist a safe CLI command string (redacts secrets)
     cli_cmd = _safe_cli_command(sys.argv)
 
-    # minimal config snapshot for run record
     config_snapshot = {
         "profiles_path": str(profiles_path),
         "profile": profile,
         "target": target,
+        "target_kind": target_kind,
+        "target_host": target_host,
         "project": project,
         "scope": scope.to_dict(),
         "headers": headers_redacted,
@@ -198,6 +256,9 @@ def scan(
             "timeout": timeout,
             "retries": retries,
             "rate_limit": rate_limit,
+            "show_cmd": show_cmd,
+            "show_output": show_output,
+            "quiet": quiet,
         },
     }
 
@@ -217,14 +278,55 @@ def scan(
             scope_block_path=str(scope_block) if scope_block else None,
         )
 
-        log_event(logger, {"event": "run.start", "run_id": run_id, "project": project, "target": target, "profile": profile, "scope": scope.describe()})
+        log_event(
+            logger,
+            {
+                "event": "run.start",
+                "run_id": run_id,
+                "project": project,
+                "target": target,
+                "profile": profile,
+                "target_kind": target_kind,
+                "target_host": target_host,
+                "scope": scope.describe(),
+            },
+        )
+
+        if not quiet:
+            console.print(
+                f"[dim]run_id={run_id}[/dim]  project=[bold]{project}[/bold]  "
+                f"profile=[bold]{profile}[/bold]  target=[bold]{target}[/bold]  "
+                f"[dim](mode={target_kind} host={target_host})[/dim]"
+            )
 
         try:
+            # Etapa 3: WhatWeb first (only for verify profile; keep passive lightweight)
+            if profile == "verify":
+                whatweb_url = target if target_kind == "url" else f"https://{target_host}/"
+                run_whatweb(
+                    profiles_cfg=profiles_cfg,
+                    out_dir=out_dir,
+                    logger=logger,
+                    url=whatweb_url,
+                    headers=headers,
+                    dry_run=dry_run,
+                    strict=strict,
+                    timeout=timeout,
+                    retries=retries,
+                    rate_limit=rate_limit,
+                    console=console,
+                    show_cmd=show_cmd,
+                    show_output=show_output,
+                    quiet=quiet,
+                )
+
             hosts, _urls = run_discovery(
                 db=db,
                 run_id=run_id,
                 project=project,
                 target=target,
+                target_kind=target_kind,
+                target_host=target_host,
                 scope=scope,
                 profiles_cfg=profiles_cfg,
                 profile=profile,
@@ -235,9 +337,13 @@ def scan(
                 timeout=timeout,
                 retries=retries,
                 rate_limit=rate_limit,
+                console=console,
+                show_cmd=show_cmd,
+                show_output=show_output,
+                quiet=quiet,
             )
 
-            # httpx verify step only if profile exists and includes it
+            # verify: httpx probing
             if profile == "verify":
                 run_httpx_verify(
                     db=db,
@@ -255,6 +361,10 @@ def scan(
                     timeout=timeout,
                     retries=retries,
                     rate_limit=rate_limit,
+                    console=console,
+                    show_cmd=show_cmd,
+                    show_output=show_output,
+                    quiet=quiet,
                 )
 
             db.update_run_status(run_id, "finished", warnings_count=warnings_count, errors_count=errors_count)
@@ -270,7 +380,7 @@ def scan(
 
 @app.command()
 def runs(
-    target: str = typer.Argument(..., help="Target root domain"),
+    target: str = typer.Argument(..., help="Target string (same value you used in scan)"),
     project: str = typer.Option("default", "--project", "-p"),
     profile: Optional[str] = typer.Option(None, "--profile"),
     db_path: Path = typer.Option(DEFAULT_DB_PATH, "--db"),
@@ -286,7 +396,7 @@ def runs(
 
 @app.command()
 def diff(
-    target: str = typer.Argument(..., help="Target root domain"),
+    target: str = typer.Argument(..., help="Target string (same value you used in scan)"),
     project: str = typer.Option("default", "--project", "-p"),
     profile: Optional[str] = typer.Option(None, "--profile", help="Filter by profile"),
     run_a: Optional[str] = typer.Option(None, "--run-a", help="Older run_id"),

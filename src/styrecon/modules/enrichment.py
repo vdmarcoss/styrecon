@@ -4,10 +4,12 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
+
+from rich.console import Console
 
 from styrecon.core.config import ProfilesConfig
-from styrecon.core.logger import log_event
+from styrecon.core.logger import log_event, redact_argv_for_logging
 from styrecon.core.runner import argv_to_cmd, run_command
 from styrecon.core.scope import ScopePolicy
 from styrecon.core.state.db import Db
@@ -17,9 +19,9 @@ from styrecon.utils.normalize import (
     canonicalize_url_for_hash,
     content_type_mime,
     normalize_host,
+    normalize_tech_list,
     normalize_title,
     normalize_url,
-    normalize_tech_list,
     normalize_webserver,
 )
 
@@ -27,6 +29,112 @@ from styrecon.utils.normalize import (
 def _sleep(rate_limit: float) -> None:
     if rate_limit > 0:
         time.sleep(rate_limit)
+
+
+def _style_status(sc: Optional[int]) -> str:
+    if sc is None:
+        return "[dim]-[/dim]"
+    if 200 <= sc <= 299:
+        return f"[green]{sc}[/green]"
+    if 300 <= sc <= 399:
+        return f"[yellow]{sc}[/yellow]"
+    if 400 <= sc <= 499:
+        return f"[red]{sc}[/red]"
+    if 500 <= sc <= 599:
+        return f"[bright_red]{sc}[/bright_red]"
+    return f"[dim]{sc}[/dim]"
+
+
+def run_whatweb(
+    *,
+    profiles_cfg: ProfilesConfig,
+    out_dir: Path,
+    logger,
+    url: str,
+    headers: List[str],
+    dry_run: bool,
+    strict: bool,
+    timeout: int,
+    retries: int,
+    rate_limit: float,
+    console: Optional[Console] = None,
+    show_cmd: bool = True,
+    show_output: bool = True,
+    quiet: bool = False,
+) -> None:
+    """
+    Run whatweb against a single URL (first-step fingerprinting).
+
+    - Adds user headers using whatweb's -H/--header option.
+    - Persists raw output to raw/whatweb.txt
+    - Shows raw stdout in CLI (unless --no-show-output or --quiet)
+    """
+    tdef = profiles_cfg.tools.get("whatweb")
+    if not tdef:
+        # No tool configured; silently skip to keep profiles flexible.
+        return
+
+    header_args: List[str] = []
+    for h in headers:
+        if ":" not in h:
+            continue
+        header_args += ["-H", h]
+
+    argv = [tdef.bin, *tdef.base_flags, *tdef.extra_flags, *header_args, url]
+
+    safe_cmd = argv_to_cmd(redact_argv_for_logging(argv))
+    log_event(logger, {"event": "tool.start", "tool": "whatweb", "cmd": safe_cmd})
+
+    if console and (not quiet) and show_cmd:
+        console.print(f"[cyan]$[/cyan] {safe_cmd}")
+
+    if console and not quiet:
+        with console.status("[cyan]Running whatweb...[/cyan]"):
+            res = run_command(
+                argv,
+                timeout_seconds=min(timeout, tdef.timeout_seconds),
+                dry_run=dry_run,
+                retries=retries,
+            )
+    else:
+        res = run_command(
+            argv,
+            timeout_seconds=min(timeout, tdef.timeout_seconds),
+            dry_run=dry_run,
+            retries=retries,
+        )
+
+    log_event(
+        logger,
+        {
+            "event": "tool.finish",
+            "tool": "whatweb",
+            "ok": res.ok,
+            "exit_code": res.exit_code,
+            "duration_ms": res.duration_ms,
+            "error": res.error,
+            "attempts": res.attempts,
+        },
+    )
+
+    write_jsonl_raw(out_dir / "raw" / "whatweb.txt", res.stdout, res.stderr)
+    _sleep(rate_limit)
+
+    if console and not quiet:
+        if res.ok:
+            console.print(f"[green]✔[/green] whatweb finished ({res.duration_ms} ms)")
+        else:
+            console.print(f"[red]✖[/red] whatweb failed exit={res.exit_code} error={res.error}")
+
+    if (not res.ok) and strict:
+        raise RuntimeError(f"whatweb failed: exit={res.exit_code} error={res.error}")
+
+    if console and (not quiet) and show_output:
+        if res.stdout:
+            console.print(res.stdout.rstrip("\n"), markup=False)
+        if res.stderr:
+            console.print("\n# --- STDERR ---", style="dim", markup=False)
+            console.print(res.stderr.rstrip("\n"), markup=False)
 
 
 def _httpx_hash_input(obj: Dict) -> Dict:
@@ -96,6 +204,10 @@ def run_httpx_verify(
     timeout: int,
     retries: int,
     rate_limit: float,
+    console: Optional[Console] = None,
+    show_cmd: bool = True,
+    show_output: bool = True,
+    quiet: bool = False,
 ) -> List[str]:
     prof = profiles_cfg.profiles.get("verify")
     if not prof:
@@ -122,13 +234,29 @@ def run_httpx_verify(
 
     argv = [tdef.bin, "-l", str(input_path), *tdef.base_flags, *tdef.extra_flags, *header_args]
 
-    log_event(logger, {"event": "tool.start", "tool": "httpx", "cmd": argv_to_cmd(argv)})
-    res = run_command(
-        argv,
-        timeout_seconds=min(timeout, tdef.timeout_seconds),
-        dry_run=dry_run,
-        retries=retries,
-    )
+    # Log cmd with sensitive headers redacted (Authorization/Cookie/etc.)
+    safe_cmd = argv_to_cmd(redact_argv_for_logging(argv))
+    log_event(logger, {"event": "tool.start", "tool": "httpx", "cmd": safe_cmd})
+
+    if console and (not quiet) and show_cmd:
+        console.print(f"[cyan]$[/cyan] {safe_cmd}")
+
+    if console and not quiet:
+        with console.status("[cyan]Running httpx...[/cyan]"):
+            res = run_command(
+                argv,
+                timeout_seconds=min(timeout, tdef.timeout_seconds),
+                dry_run=dry_run,
+                retries=retries,
+            )
+    else:
+        res = run_command(
+            argv,
+            timeout_seconds=min(timeout, tdef.timeout_seconds),
+            dry_run=dry_run,
+            retries=retries,
+        )
+
     log_event(
         logger,
         {
@@ -144,12 +272,20 @@ def run_httpx_verify(
     write_jsonl_raw(out_dir / "raw" / "httpx.jsonl", res.stdout, res.stderr)
     _sleep(rate_limit)
 
+    if console and not quiet:
+        if res.ok:
+            console.print(f"[green]✔[/green] httpx finished ({res.duration_ms} ms)")
+        else:
+            console.print(f"[red]✖[/red] httpx failed exit={res.exit_code} error={res.error}")
+
     if not res.ok and strict:
         raise RuntimeError(f"httpx failed: exit={res.exit_code} error={res.error}")
 
     # Parse JSONL output (best-effort; may be partial on timeout)
     urls_seen: List[str] = []
     export_by_url: Dict[str, Dict] = {}
+
+    seen_console: set[str] = set()
 
     for line in res.stdout.splitlines():
         s = line.strip()
@@ -218,6 +354,23 @@ def run_httpx_verify(
             "hash": data_hash,
         }
 
+        if console and (not quiet) and show_output and url not in seen_console:
+            seen_console.add(url)
+            sc = hash_input.get("status_code")
+            title_norm = hash_input.get("title_norm") or ""
+            tech_norm = hash_input.get("tech_norm") or []
+            tech_short = ", ".join(tech_norm[:6]) if isinstance(tech_norm, list) else ""
+            suffix = ""
+            if title_norm:
+                suffix += f"  [dim]{title_norm}[/dim]"
+            if tech_short:
+                suffix += f"  [dim]({tech_short})[/dim]"
+            console.print(f"{_style_status(sc)} {url}{suffix}")
+
     urls_seen = sorted(set(urls_seen))
     write_jsonl_sorted(out_dir / "results.httpx.jsonl", list(export_by_url.values()), key="url")
+
+    if console and not quiet:
+        console.print(f"[dim]httpx: {len(urls_seen)} urls[/dim]")
+
     return urls_seen

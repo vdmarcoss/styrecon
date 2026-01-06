@@ -26,6 +26,11 @@ tools:
     extra_flags: ["-threads", "10", "-rl", "50"]
     timeout_seconds: 600
 
+  whatweb:
+    bin: "whatweb"
+    base_flags: ["--color=never", "--no-errors"]
+    timeout_seconds: 300
+
 profiles:
   passive:
     description: "OSINT discovery only (low/no direct probing)."
