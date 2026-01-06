@@ -1,82 +1,66 @@
-# StyRecon — Pura Vida Ops
+# StyRecon — Pura Vida Ops 🇨🇷
 
-> **Use only on targets you are authorized to test.**
+[![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://python.org)
 
-**StyRecon** (`styrecon`) is an open-source **Python** CLI that orchestrates common bug bounty recon tools in a **scope-aware** and **stateful** way:
-- **Scope-aware:** allow/block patterns to prevent accidental scanning.
-- **Stateful:** stores runs + observations in **SQLite**, enabling diffs between runs.
-- **Reproducible:** deterministic artifacts (JSONL) + run logs.
+> [!CAUTION]
+> **Use StyRecon only on targets you are authorized to test.**  
+> The authors are not responsible for any misuse or damage caused by this tool.
 
-It is designed to run locally (e.g., a Kali Linux VM) and orchestrate external binaries via `subprocess` (no Python wrappers, no chatops).
+**StyRecon** (`styrecon`) is an open-source **Python** CLI that orchestrates a modern bug bounty recon toolchain with a **stateful** and **scope-aware** approach.
 
----
-
-## Features (v0.1)
-
-### ✅ Profiles: `passive` / `verify`
-- **passive**
-  - `subfinder` → hosts
-  - `assetfinder` → hosts
-  - `waybackurls` → URLs (stored as artifacts)
-- **verify**
-  - Everything from `passive`
-  - `httpx-toolkit` → HTTP probing (low noise)
-  - `whatweb` runs **first** to quickly fingerprint the target
-
-### ✅ Scope guardrails
-- `--scope-auto` builds a conservative allowlist from the target.
-- Optional allow/block files.
-- `--no-scope` requires `--i-accept-risk`.
-
-### ✅ URL vs Domain target handling
-- If the target is a **URL** (`https://...`), StyRecon switches to **URL mode**:
-  - Skips `subfinder` / `assetfinder` (no subdomain expansion by default)
-  - Seeds verification from the URL host
-- If the target is a **domain**, StyRecon runs discovery + verify normally.
-
-### ✅ Safe logging & secret redaction
-- Headers like `Authorization`, `Cookie`, `X-API-Key`, etc. are redacted in:
-  - CLI displayed commands
-  - Logs
-  - Metadata files
-
-### ✅ Outputs you can diff and automate
-- Run artifacts in `.runtime/runs/...`
-- SQLite DB inventory in `.runtime/styrecon.sqlite`
+Instead of running tools in isolation, StyRecon captures the “state” of your targets, enabling safe recon workflows and diffs between runs — while enforcing scope guardrails to reduce out-of-scope accidents.
 
 ---
 
-## In Development 🚧
-These features are planned but **not shipped** in v0.1:
-- `ffuf` (active content discovery)
-- `feroxbuster` (active directory/content discovery)
-- `waybackurls-verify` (optionally verify sampled Wayback URLs with httpx)
+## 🚀 Key Features (v0.1)
 
-> Active scanning will be **opt-in** with strict guardrails (rate limits, caps, safety switches).
+### 🛡️ Scope Guardrails (Safety First)
+- **Target mode:** Automatically distinguishes between:
+  - **Domain mode** → discovery + verify
+  - **URL mode** → strict host probing (no subdomain expansion by default)
+- **Auto-scope:** `--scope-auto` builds a conservative allowlist based on your target.
+- **Allow/Block patterns:** Use scope allow/block files to avoid forbidden subdomains or out-of-scope assets.
+- **Risk acknowledgement:** Disabling scope requires `--no-scope --i-accept-risk`.
 
----
+### 🧠 Stateful Recon (SQLite)
+- **SQLite backend:** Runs, assets, and observations are stored structurally.
+- **Smart diffing:** Compare runs to spot new hosts and meaningful HTTP fingerprint changes.
+- **Redaction by design:** Sensitive headers (`Authorization`, `Cookie`, `X-API-Key`, etc.) are automatically redacted from CLI command display and logs.
 
-## Requirements
+### 🛠️ Execution Profiles
+- **`passive`**: OSINT discovery (`subfinder`, `assetfinder`, `waybackurls`)
+- **`verify`**: Discovery + fingerprinting (`whatweb`, runs first) + HTTP probing (`httpx-toolkit`)
 
-### Python
-- Python `>= 3.10`
-
-### External tools (must be in `$PATH`)
-- `subfinder`
-- `assetfinder`
-- `waybackurls`
-- `httpx-toolkit` (httpx)
-- `whatweb`
-
-> Install these using your preferred method (e.g., `go install`, distro packages, or official releases).
+> Note: `waybackurls` output is stored as an artifact and **is not verified by httpx** in v0.1 (by design to avoid noise).
 
 ---
 
-## Install
+## 🚧 In Development
+Planned but **not shipped** in v0.1:
+- `ffuf` integration (active content discovery)
+- `feroxbuster` integration (active directory/content discovery)
+- **Wayback-Verify**: sampling and probing Wayback URLs with strict limits/rate-limiting
 
-### From source (recommended for now)
+---
+
+## 🛠️ Requirements
+
+StyRecon orchestrates external binaries. Ensure the following are available in your `$PATH`:
+
+| Tool | Purpose | Source |
+| :--- | :--- | :--- |
+| `subfinder` | Passive subdomain discovery | https://github.com/projectdiscovery/subfinder |
+| `assetfinder` | Host discovery | https://github.com/tomnomnom/assetfinder |
+| `waybackurls` | Historic URL OSINT | https://github.com/tomnomnom/waybackurls |
+| `httpx-toolkit` | HTTP probing & tech detect | https://github.com/projectdiscovery/httpx |
+| `whatweb` | Web technology fingerprinting | https://github.com/urbanadventurer/WhatWeb |
+
+---
+
+## ⚙️ Installation
+
 ```bash
-git clone <your-repo-url>
+git clone <REPO_URL>
 cd styrecon
 
 python -m venv .venv
@@ -89,3 +73,95 @@ pip install -e .
 ```bash
 styrecon --help
 ```
+
+---
+
+## 📖 Usage Examples
+
+- 1) Passive scan (domain)
+```bash
+styrecon scan target.com \
+  --project my_bug_bounty \
+  --profile passive \
+  --scope-auto
+```
+
+- 2) Verify a domain (discovery + http probe) + adding headers required in the bug hunter program with option `-H`
+```bash
+styrecon scan target.com \
+  --profiles config/profiles.yaml \
+  --project my_bug_bounty \
+  --profile verify \
+  --scope-auto \
+  -H "X-H1-traffic: myuser" \
+  --out .runtime/runs \
+  --db .runtime/styrecon.sqlite \
+  --rate-limit 0.2 \
+  --timeout 1200 \
+  --retries 1 \
+  --verbose
+
+```
+
+- 3) Verify an exact URL (URL mode)
+```bash
+# URL mode skips subdomain discovery and probes only the URL host (seeded)
+styrecon scan "https://api.target.com/v1" \
+  --project my_bug_bounty \
+  --profile verify \
+  --scope-auto \
+  -H "X-H1-traffic: myuser"
+```
+
+- 4) Diff runs
+```bash
+# Compare the last two runs for a target
+styrecon diff target.com \
+  --project my_bug_bounty \
+  --profile verify \
+  --db .runtime/styrecon.sqlite
+```
+
+
+- 5) Dry-run (prints commands, executes nothing)
+```bash
+styrecon scan target.com \
+  --project my_bug_bounty \
+  --profile verify \
+  --scope-auto \
+  -H "Authorization: Bearer <token>" \
+  --dry-run \
+  --verbose
+
+# Secrets are redacted in CLI/logs.
+```
+
+---
+
+## 📁 Output Structure
+All data is stored in `.runtime/` (recommended to keep gitignored):
+- `.runtime/styrecon.sqlite` — central state store (runs, assets, observations)
+- `.runtime/runs/{project}/{target}/{run_id}/`
+    - `run.log` — execution log (redacted)
+    - `raw/` — raw tool outputs (subfinder.jsonl, httpx.jsonl, etc.)
+    - `results.hosts.jsonl` — cleaned/unique hosts
+    - `results.waybackurls.jsonl` — cleaned/unique Wayback URLs
+    - `results.httpx.jsonl` — summarized httpx results (verify profile)
+
+---
+
+## 🗺️ Roadmap
+- `ffuf` & `feroxbuster` integration (active scanning, opt-in with guardrails)
+- Wayback-Verify (sampling + rate-limited probing)
+- Export to Markdown/HTML reports
+- Integration tests for scan/diff pipelines
+
+---
+
+## License
+- See `LICENSE`.
+
+---
+
+## 🇨🇷 Pura Vida Ops
+Built for reproducibility, safety, and practical bug bounty workflows.
