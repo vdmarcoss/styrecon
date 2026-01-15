@@ -23,6 +23,7 @@ from styrecon.core.state.db import DEFAULT_DB_PATH, Db, ensure_db_initialized
 from styrecon.core.state.diff import diff_runs
 from styrecon.modules.discovery import run_discovery
 from styrecon.modules.enrichment import run_httpx_verify, run_whatweb
+from styrecon.modules.jshunt import run_jshunt
 from styrecon.utils.ids import new_run_id
 
 app = typer.Typer(no_args_is_help=True)
@@ -154,6 +155,20 @@ def _print_banner(*, quiet: bool) -> None:
     console.print("[dim]Use only on targets you are authorized to test.[/dim]")
 
 
+def _dedupe_preserve_order(items: List[str]) -> List[str]:
+    seen = set()
+    out: List[str] = []
+    for x in items:
+        s = (x or "").strip()
+        if not s:
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
 @app.command()
 def scan(
     target: str = typer.Argument(
@@ -170,7 +185,9 @@ def scan(
     db_path: Path = typer.Option(DEFAULT_DB_PATH, "--db", help="SQLite DB path"),
     scope_allow: Optional[Path] = typer.Option(None, "--scope-allow", help="Allowlist file (one host/pattern per line)"),
     scope_block: Optional[Path] = typer.Option(None, "--scope-block", help="Blocklist file (one host/pattern per line)"),
-    scope_auto: bool = typer.Option(False, "--scope-auto", help="Auto-allow target (and subdomains only for domain targets)"),
+    scope_auto: bool = typer.Option(
+        False, "--scope-auto", help="Auto-allow target (and subdomains only for domain targets)"
+    ),
     no_scope: bool = typer.Option(False, "--no-scope", help="Disable scope (requires --i-accept-risk)"),
     i_accept_risk: bool = typer.Option(False, "--i-accept-risk", help="Required when using --no-scope"),
     header: List[str] = typer.Option(
@@ -180,6 +197,11 @@ def scan(
         help="Custom header (repeatable), e.g. -H 'X-H1-traffic: sty10x'",
     ),
     headers_file: Optional[Path] = typer.Option(None, "--headers-file", help="File with headers (one per line)"),
+    # --- v2.0: JS Hunt (opt-in) ---
+    js: bool = typer.Option(False, "--js", help="Enable JS Hunt (katana extract + download JS to ./js_downloads/)"),
+    js_concurrency: int = typer.Option(5, "--js-concurrency", help="Concurrent JS downloads (default: 5)"),
+    js_max_files: int = typer.Option(100, "--js-max-files", help="Max JS files to download (default: 100)"),
+    # ---
     dry_run: bool = typer.Option(False, "--dry-run", help="Do not execute tools; only create run record + folders"),
     strict: bool = typer.Option(False, "--strict", help="Fail the run if a tool exits non-zero"),
     timeout: int = typer.Option(600, "--timeout", help="Max seconds per tool (cap)"),
@@ -210,6 +232,12 @@ def scan(
     profiles_cfg: ProfilesConfig = load_profiles_config(profiles_path)
 
     _print_banner(quiet=quiet)
+
+    if js:
+        if js_concurrency < 1:
+            raise typer.BadParameter("--js-concurrency must be >= 1")
+        if js_max_files < 1:
+            raise typer.BadParameter("--js-max-files must be >= 1")
 
     target_kind = detect_target_kind(target)
     target_host = extract_target_host(target)
@@ -259,6 +287,9 @@ def scan(
             "show_cmd": show_cmd,
             "show_output": show_output,
             "quiet": quiet,
+            "js": js,
+            "js_concurrency": js_concurrency,
+            "js_max_files": js_max_files,
         },
     }
 
@@ -298,6 +329,11 @@ def scan(
                 f"profile=[bold]{profile}[/bold]  target=[bold]{target}[/bold]  "
                 f"[dim](mode={target_kind} host={target_host})[/dim]"
             )
+
+        if js and profile != "verify":
+            warnings_count += 1
+            if not quiet:
+                console.print("[yellow]Note:[/yellow] --js is only executed under --profile verify (skipping).")
 
         try:
             # Etapa 3: WhatWeb first (only for verify profile; keep passive lightweight)
@@ -345,6 +381,15 @@ def scan(
 
             # verify: httpx probing
             if profile == "verify":
+                # --- v2.0 fix: URL-mode should probe the user-specified URL (including path) ---
+                # Otherwise httpx tends to probe only the host root, which can drop paths like "/s/".
+                httpx_inputs: List[str] = list(hosts or [])
+                if target_kind == "url":
+                    # Put the full target URL first so it is definitely included in httpx.input.txt
+                    httpx_inputs = [target] + httpx_inputs
+                httpx_inputs = _dedupe_preserve_order(httpx_inputs)
+                # ---------------------------------------------------------------------------
+
                 run_httpx_verify(
                     db=db,
                     run_id=run_id,
@@ -354,7 +399,7 @@ def scan(
                     profiles_cfg=profiles_cfg,
                     out_dir=out_dir,
                     logger=logger,
-                    hosts=hosts,
+                    hosts=httpx_inputs,  # may include full URL(s) in URL-mode
                     headers=headers,
                     dry_run=dry_run,
                     strict=strict,
@@ -366,6 +411,31 @@ def scan(
                     show_output=show_output,
                     quiet=quiet,
                 )
+
+                # v2.0: JS Hunt (opt-in), executed after httpx on live pages only
+                if js:
+                    run_jshunt(
+                        profiles_cfg=profiles_cfg,
+                        scope=scope,
+                        out_dir=out_dir,
+                        logger=logger,
+                        project=project,
+                        target=target,
+                        headers=headers,
+                        dry_run=dry_run,
+                        strict=strict,
+                        timeout=timeout,
+                        retries=retries,
+                        rate_limit=rate_limit,
+                        js_concurrency=js_concurrency,
+                        js_max_files=js_max_files,
+                        cwd=Path.cwd(),
+                        httpx_results_path=out_dir / "results.httpx.jsonl",
+                        console=console,
+                        show_cmd=show_cmd,
+                        show_output=False,  # keep console quiet; jshunt prints only summaries
+                        quiet=quiet,
+                    )
 
             db.update_run_status(run_id, "finished", warnings_count=warnings_count, errors_count=errors_count)
             log_event(logger, {"event": "run.finish", "run_id": run_id, "status": "finished"})

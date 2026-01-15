@@ -1,4 +1,4 @@
-# StyRecon profiles (v0.1)
+# StyRecon profiles (v2.0)
 # Keep conservative defaults; active scanning is placeholder.
 tools:
   subfinder:
@@ -22,7 +22,6 @@ tools:
   httpx:
     bin: "httpx-toolkit"
     base_flags: ["-silent", "-json", "-sc", "-title", "-tech-detect", "-web-server"]
-    # Friendly-ish defaults; tune tomorrow if needed.
     extra_flags: ["-threads", "10", "-rl", "50"]
     timeout_seconds: 600
 
@@ -30,7 +29,12 @@ tools:
     bin: "whatweb"
     base_flags: ["--color=never", "--no-errors"]
     timeout_seconds: 300
-
+  
+  katana:
+    bin: "katana"
+    base_flags: ["-silent","-nc","-jsonl","-d","2","-no-default-ext-filter","-or","-ob","-retry","2"]
+    extra_flags: ["-c","5","-rl","50"]
+    timeout_seconds: 600
 profiles:
   passive:
     description: "OSINT discovery only (low/no direct probing)."
